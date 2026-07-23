@@ -3,6 +3,8 @@ uvicorn[standard]
 sqlalchemy[asyncio]
 asyncpg
 arq
+langgraph
+langgraph-checkpoint-redis
 pydantic
 pydantic-settings
 httpx

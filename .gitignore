@@ -29,3 +29,6 @@ yarn-error.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# Phase 4 test scratch (defensive; test now uses system temp)
+phase4_logs/
