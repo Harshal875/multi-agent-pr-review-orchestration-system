@@ -17,7 +17,6 @@ rather than raised, so one agent's outage degrades to fewer findings, not a fail
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -30,8 +29,9 @@ from backend.observability.events import emit_agent_event, estimate_cost_usd
 from backend.observability.tracing import traced_span
 from backend.orchestrator.state import ReviewState
 from backend.prompts.registry import get_prompt
+from backend.reliability.circuit_breaker import CircuitOpenError
 from backend.tools import capability_scope, model_router, tool_registry
-from backend.tools.llm_client import complete
+from backend.tools.llm_client import complete_async
 
 logger = logging.getLogger("agents")
 
@@ -153,12 +153,23 @@ async def run_specialist(agent_type: AgentType, state: ReviewState) -> list[Find
                     logger.info("agent=%s model=%s: calling LLM", agent_type.value, model)
                     t_llm0 = time.monotonic()
                     try:
-                        # complete() is a blocking network call; keep the event loop free
-                        # so the four specialists actually run concurrently
-                        # (ARCHITECTURE §3.2 parallel fan-out).
-                        result = await asyncio.to_thread(
-                            complete, model=model, system=system_prompt, user=user_message,
+                        # complete_async retries transient failures with backoff and
+                        # trips a shared circuit breaker after repeated ones
+                        # (reliability/retry.py, circuit_breaker.py - Phase 12).
+                        result = await complete_async(
+                            model=model, system=system_prompt, user=user_message,
                             max_tokens=_MAX_TOKENS,
+                        )
+                    except CircuitOpenError as exc:
+                        latency_ms = int((time.monotonic() - t_llm0) * 1000)
+                        logger.warning(
+                            "agent=%s: LLM circuit open, failing fast: %s", agent_type.value, exc
+                        )
+                        await emit_agent_event(
+                            agent_type.value, "llm.call",
+                            span_id=llm_span_id, parent_span=llm_parent_span,
+                            model=model, latency_ms=latency_ms, outcome="circuit_open",
+                            payload={"error": str(exc)},
                         )
                     except Exception as exc:  # noqa: BLE001 - one specialist's outage != a failed review
                         latency_ms = int((time.monotonic() - t_llm0) * 1000)

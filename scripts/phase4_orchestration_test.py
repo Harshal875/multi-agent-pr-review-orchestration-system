@@ -125,11 +125,13 @@ def _patch_llm_for_determinism() -> None:
     backend.tools.llm_client (where it's *defined*) - the standard rule for monkeypatching
     a `from module import name` import: the call site resolves the name from its own
     module globals, not the original module, so patching there is what other code paths
-    (base_agent.run_specialist) actually see."""
+    (base_agent.run_specialist) actually see. As of Phase 12, base_agent calls
+    complete_async (the retry/circuit-breaker-wrapped entry point) - the stub must be an
+    async function replacing that name, not the old sync complete()."""
     import backend.agents.base_agent as base_agent_module
     from backend.tools.llm_client import LLMResult
 
-    def _fake_complete(*, model, system, user, max_tokens=4096, effort=None, thinking=False):
+    async def _fake_complete_async(*, model, system, user, max_tokens=4096, effort=None, thinking=False):
         return LLMResult(
             text=(
                 '[{"category":"test","summary":"stub finding","file_path":"PLACEHOLDER",'
@@ -140,7 +142,7 @@ def _patch_llm_for_determinism() -> None:
             model="stub-model", input_tokens=0, output_tokens=0,
         )
 
-    base_agent_module.complete = _fake_complete
+    base_agent_module.complete_async = _fake_complete_async
 
 
 async def main() -> int:

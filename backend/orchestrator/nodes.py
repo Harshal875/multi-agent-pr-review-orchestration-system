@@ -24,6 +24,7 @@ from backend.observability import workflow_context
 from backend.observability.events import emit_agent_event
 from backend.observability.tracing import traced_span
 from backend.orchestrator.state import ReviewState
+from backend.reliability.timeout import with_timeout
 
 logger = logging.getLogger("orchestrator")
 
@@ -35,6 +36,15 @@ _AGENT_MODULES = {
     "docs": docs_agent,
 }
 
+# Hard per-node ceilings (Phase 12) so the aggregator can never wait forever on one
+# stalled agent. 60s covers a slow LLM call plus its own internal retries+backoff
+# (complete_async already retries up to 3x - this timeout is the outer backstop, not
+# a substitute for it). A timed-out specialist degrades to zero findings, same as any
+# other specialist failure (base_agent.py already treats that as a normal outcome).
+_SPECIALIST_TIMEOUT_S = 60.0
+_BUILD_CONTEXT_TIMEOUT_S = 10.0
+_AGGREGATE_TIMEOUT_S = 30.0
+
 
 def _log_exec(node: str) -> None:
     ts = time.time()
@@ -45,6 +55,7 @@ def _log_exec(node: str) -> None:
     logger.info("node=%s ts=%.3f", node, ts)
 
 
+@with_timeout(_BUILD_CONTEXT_TIMEOUT_S, default={})
 async def build_context(state: ReviewState) -> dict:
     """Fan-out trigger node. Retrieval happens per-specialist (Phase 6/8), not here, so
     this node has no work of its own beyond marking that the graph started."""
@@ -58,18 +69,22 @@ async def _run_specialist_node(name: str, state: ReviewState) -> dict:
     return {"findings": [f.model_dump(mode="json") for f in findings]}
 
 
+@with_timeout(_SPECIALIST_TIMEOUT_S, default={"findings": []})
 async def security_node(state: ReviewState) -> dict:
     return await _run_specialist_node("security", state)
 
 
+@with_timeout(_SPECIALIST_TIMEOUT_S, default={"findings": []})
 async def quality_node(state: ReviewState) -> dict:
     return await _run_specialist_node("quality", state)
 
 
+@with_timeout(_SPECIALIST_TIMEOUT_S, default={"findings": []})
 async def tests_node(state: ReviewState) -> dict:
     return await _run_specialist_node("tests", state)
 
 
+@with_timeout(_SPECIALIST_TIMEOUT_S, default={"findings": []})
 async def docs_node(state: ReviewState) -> dict:
     return await _run_specialist_node("docs", state)
 
@@ -115,6 +130,17 @@ def _dedup(findings: list[dict]) -> list[dict]:
     return kept
 
 
+@with_timeout(
+    _AGGREGATE_TIMEOUT_S,
+    # Conservative-by-construction: if aggregation itself somehow doesn't finish (it
+    # has no external calls beyond one event write, so this should be rare), never
+    # guess "post" - force a human to look rather than risk auto-posting an incomplete
+    # or unscored result.
+    default={
+        "deduped_findings": [], "overall_confidence": None,
+        "decision": "awaiting_human", "hitl_reason": "aggregation_timeout",
+    },
+)
 async def aggregate(state: ReviewState) -> dict:
     """Merge the four specialists' findings, dedup, score, and apply the ADR-000
     confidence-weighted HITL gate."""

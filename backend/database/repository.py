@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database.models import FindingRecord, PRReviewRecord
 from backend.models.webhook import WebhookEvent
+from backend.reliability.idempotency import idempotent_insert
 
 
 async def create_pending_review(
@@ -21,7 +22,9 @@ async def create_pending_review(
 
     Returns (record, created). If a row with this delivery_id already exists (a replayed
     GitHub delivery), no new row is written and the existing record is returned with
-    created=False. This is the L8 idempotency defense at the data layer.
+    created=False. This is the L8 idempotency defense at the data layer, formalized as
+    reliability/idempotency.py's idempotent_insert() (Phase 12) rather than the hand-
+    rolled insert/conflict/fetch dance this function used before.
     """
     stmt = (
         pg_insert(PRReviewRecord)
@@ -34,19 +37,13 @@ async def create_pending_review(
         .on_conflict_do_nothing(index_elements=["delivery_id"])
         .returning(PRReviewRecord)
     )
-    result = await session.execute(stmt)
-    row = result.scalar_one_or_none()
-
-    if row is not None:
-        await session.commit()
-        return row, True
-
-    # Conflict: fetch the pre-existing record for this delivery_id.
-    existing = await session.scalar(
-        select(PRReviewRecord).where(PRReviewRecord.delivery_id == event.delivery_id)
+    return await idempotent_insert(
+        session,
+        stmt,
+        lambda: session.scalar(
+            select(PRReviewRecord).where(PRReviewRecord.delivery_id == event.delivery_id)
+        ),
     )
-    assert existing is not None  # UNIQUE conflict implies a row exists
-    return existing, False
 
 
 async def get_review(session: AsyncSession, review_id: uuid.UUID) -> PRReviewRecord | None:
