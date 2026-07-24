@@ -13,7 +13,12 @@ observability/tracing.py, tagged with the ambient review_id from workflow_contex
 
 A specialist's own failure (bad JSON, network error, tool error) is caught and logged
 rather than raised, so one agent's outage degrades to fewer findings, not a failed review
-(ARCHITECTURE L8 - "the review still completes... rather than hanging forever")."""
+(ARCHITECTURE L8 - "the review still completes... rather than hanging forever").
+
+Security (Phase 11, security/threat_model.py): the diff is masked for secrets and
+wrapped as untrusted content before anything downstream - retrieval, the lint tool, the
+LLM call - ever sees it, so a hardcoded credential never reaches an external party and a
+"ignore your instructions" comment is delimited as data, never obeyed as a command."""
 
 from __future__ import annotations
 
@@ -30,6 +35,8 @@ from backend.observability.tracing import traced_span
 from backend.orchestrator.state import ReviewState
 from backend.prompts.registry import get_prompt
 from backend.reliability.circuit_breaker import CircuitOpenError
+from backend.security.injection_guard import scan_for_injection, wrap_untrusted
+from backend.security.masking import mask_secrets
 from backend.tools import capability_scope, model_router, tool_registry
 from backend.tools.llm_client import complete_async
 
@@ -107,6 +114,26 @@ async def run_specialist(agent_type: AgentType, state: ReviewState) -> list[Find
             diff_text = state.get("diff") or ""
             repo = state.get("repo") or ""
 
+            # Mask secrets FIRST, before diff_text is used anywhere - retrieval, the
+            # lint tool, and the LLM call all send this value to an external party, so
+            # everything downstream must see the masked version (security/masking.py,
+            # threat_model.py threat #2). Detect (not filter) injection-shaped phrasing
+            # for the audit log; the actual defense is wrap_untrusted() below, applied
+            # unconditionally when building the LLM prompt (threat #1).
+            if diff_text:
+                diff_text, masked_categories = mask_secrets(diff_text)
+                if masked_categories:
+                    logger.warning(
+                        "agent=%s: masked %d secret(s) in diff: %s",
+                        agent_type.value, len(masked_categories), masked_categories,
+                    )
+                injection_hits = scan_for_injection(diff_text)
+                if injection_hits:
+                    logger.warning(
+                        "agent=%s: diff contains injection-shaped phrasing: %s",
+                        agent_type.value, injection_hits,
+                    )
+
             context_chunks: list[dict] = []
             if diff_text and repo:
                 capability_scope.enforce(agent_type, "retrieve_context")
@@ -133,7 +160,8 @@ async def run_specialist(agent_type: AgentType, state: ReviewState) -> list[Find
                                                     "hits": len(lint_hits)},
                         )
 
-            user_parts = [f"PR diff:\n{diff_text or '(no diff provided)'}"]
+            diff_for_prompt = wrap_untrusted(diff_text) if diff_text else "(no diff provided)"
+            user_parts = [f"PR diff:\n{diff_for_prompt}"]
             user_parts.append(
                 f"\nRetrieved codebase context:\n{_format_context(context_chunks)}"
             )

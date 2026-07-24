@@ -23,6 +23,7 @@ import psycopg
 from backend.config import settings
 from backend.data.freshness import content_hash, get_indexed_hash, record_indexed
 from backend.memory.embedder import embed_documents
+from backend.security.masking import mask_secrets
 
 # Which files to index — source/text; everything else (binaries, media) is skipped.
 TEXT_EXTENSIONS = {
@@ -85,7 +86,10 @@ def _vec_literal(vec: list[float]) -> str:
 
 
 def ingest_repo(repo_name: str, root: Path) -> dict:
-    stats = {"files_seen": 0, "files_changed": 0, "files_skipped": 0, "chunks_written": 0}
+    stats = {
+        "files_seen": 0, "files_changed": 0, "files_skipped": 0, "chunks_written": 0,
+        "secrets_masked": 0,
+    }
 
     with psycopg.connect(settings.tiger_database_url, autocommit=False) as conn:
         with conn.cursor() as cur:
@@ -105,7 +109,16 @@ def ingest_repo(repo_name: str, root: Path) -> dict:
                 if get_indexed_hash(cur, repo_name, rel) == h:
                     stats["files_skipped"] += 1
                     continue
-                changed.append((rel, h, chunk_text(content)))
+
+                # Mask secrets in each chunk before it's embedded or stored - both
+                # code_chunks.content and the vector sent to Voyage must be the masked
+                # version (security/masking.py, threat_model.py threat #2).
+                masked_chunks = []
+                for chunk_index, text, symbol in chunk_text(content):
+                    masked_text, hits = mask_secrets(text)
+                    stats["secrets_masked"] += len(hits)
+                    masked_chunks.append((chunk_index, masked_text, symbol))
+                changed.append((rel, h, masked_chunks))
 
             # Pass 2: embed every collected chunk in one throttled, batched sweep.
             all_texts = [text for _, _, chunks in changed for _, text, _ in chunks]
@@ -150,7 +163,8 @@ def main() -> None:
     print(
         f"  files: {stats['files_seen']} seen, {stats['files_changed']} (re)embedded, "
         f"{stats['files_skipped']} unchanged\n"
-        f"  chunks written: {stats['chunks_written']}"
+        f"  chunks written: {stats['chunks_written']} "
+        f"(secrets masked: {stats['secrets_masked']})"
     )
 
 
