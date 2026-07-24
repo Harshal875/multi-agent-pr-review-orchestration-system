@@ -4,8 +4,10 @@ test_agent, and docs_agent are thin dispatchers over this one pipeline (agents/*
 - they differ only in which AgentType they pass, which selects the domain prompt
 (prompts/templates/<type>.md, Phase 5) and the routed model (tools/model_router, Phase 5).
 
-BudgetGuard (Phase 16) plugs in at the marked point below; it's a no-op today since that
-module isn't built yet, but the pipeline is already shaped for it. Event emission
+BudgetGuard (Phase 16) runs first, before any external call: if today's spend (read from
+agent_health_1m) has already reached DAILY_BUDGET_USD, the agent stops here - no
+retrieval, no tool call, no LLM call - and returns a Finding-free result with a
+budget_exceeded span.end event, instead of spending further. Event emission
 (Phase 10) is wired for real: every specialist run gets its own span (span.start/
 span.end), with llm.call and (security-only) tool.call as nested sub-spans - both written
 to agent_events via observability/events.py and mirrored as OTel spans via
@@ -27,6 +29,7 @@ import logging
 import time
 
 from backend.agents.contracts import Finding
+from backend.economics.budget import BudgetGuard
 from backend.memory.context_retriever import retrieve
 from backend.models.enums import AgentType
 from backend.observability import workflow_context
@@ -109,7 +112,20 @@ async def run_specialist(agent_type: AgentType, state: ReviewState) -> list[Find
                 span_id=agent_span_id, parent_span=agent_parent_span,
             )
 
-            # --- BudgetGuard check (Phase 16 plugs in here; no-op until then) ---
+            budget = await BudgetGuard.check()
+            if budget.blocked:
+                logger.warning(
+                    "agent=%s: daily budget exceeded ($%.4f >= $%.4f), skipping LLM call",
+                    agent_type.value, budget.spent_usd, budget.cap_usd,
+                )
+                await emit_agent_event(
+                    agent_type.value, "span.end",
+                    span_id=agent_span_id, parent_span=agent_parent_span,
+                    outcome="budget_exceeded",
+                    latency_ms=int((time.monotonic() - t_agent0) * 1000),
+                    payload={"spent_usd": budget.spent_usd, "cap_usd": budget.cap_usd},
+                )
+                return []
 
             diff_text = state.get("diff") or ""
             repo = state.get("repo") or ""
