@@ -114,7 +114,37 @@ async def do_run2(thread: str) -> int:
     return 0 if ok else 1
 
 
+def _patch_llm_for_determinism() -> None:
+    """Phase 4 tests graph topology & checkpointing, not LLM reasoning (that's Phase 8's
+    job - see scripts/phase8_agents_test.py). Stub the one real network call (Groq) so
+    this regression test is fast, free, and deterministic regardless of live model
+    availability. With diff="" every specialist's retrieval/tool calls short-circuit
+    already (base_agent.py), so this is the only network call left to stub.
+
+    Patched onto backend.agents.base_agent (where the name is *used*), not
+    backend.tools.llm_client (where it's *defined*) - the standard rule for monkeypatching
+    a `from module import name` import: the call site resolves the name from its own
+    module globals, not the original module, so patching there is what other code paths
+    (base_agent.run_specialist) actually see."""
+    import backend.agents.base_agent as base_agent_module
+    from backend.tools.llm_client import LLMResult
+
+    def _fake_complete(*, model, system, user, max_tokens=4096, effort=None, thinking=False):
+        return LLMResult(
+            text=(
+                '[{"category":"test","summary":"stub finding","file_path":"PLACEHOLDER",'
+                '"line_start":null,"line_end":null,"suggestion":null,"confidence":0.8,'
+                '"rationale":"Phase 4 regression test - LLM call stubbed for determinism.",'
+                '"severity":"INFO"}]'
+            ),
+            model="stub-model", input_tokens=0, output_tokens=0,
+        )
+
+    base_agent_module.complete = _fake_complete
+
+
 async def main() -> int:
+    _patch_llm_for_determinism()
     mode = sys.argv[1]
     thread = sys.argv[2]
     if mode == "parallel":
