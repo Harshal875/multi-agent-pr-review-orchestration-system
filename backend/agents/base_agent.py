@@ -4,9 +4,12 @@ test_agent, and docs_agent are thin dispatchers over this one pipeline (agents/*
 - they differ only in which AgentType they pass, which selects the domain prompt
 (prompts/templates/<type>.md, Phase 5) and the routed model (tools/model_router, Phase 5).
 
-BudgetGuard (Phase 16) and event emission into agent_events (Phase 10) plug in at the
-marked points below; both are no-ops today since neither module is built yet, but the
-pipeline is already shaped for them so wiring them in later doesn't restructure this file.
+BudgetGuard (Phase 16) plugs in at the marked point below; it's a no-op today since that
+module isn't built yet, but the pipeline is already shaped for it. Event emission
+(Phase 10) is wired for real: every specialist run gets its own span (span.start/
+span.end), with llm.call and (security-only) tool.call as nested sub-spans - both written
+to agent_events via observability/events.py and mirrored as OTel spans via
+observability/tracing.py, tagged with the ambient review_id from workflow_context.
 
 A specialist's own failure (bad JSON, network error, tool error) is caught and logged
 rather than raised, so one agent's outage degrades to fewer findings, not a failed review
@@ -17,10 +20,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 from backend.agents.contracts import Finding
 from backend.memory.context_retriever import retrieve
 from backend.models.enums import AgentType
+from backend.observability import workflow_context
+from backend.observability.events import emit_agent_event, estimate_cost_usd
+from backend.observability.tracing import traced_span
 from backend.orchestrator.state import ReviewState
 from backend.prompts.registry import get_prompt
 from backend.tools import capability_scope, model_router, tool_registry
@@ -85,57 +92,111 @@ def _parse_findings(agent_type: AgentType, raw_text: str) -> list[Finding]:
 
 
 async def run_specialist(agent_type: AgentType, state: ReviewState) -> list[Finding]:
-    # --- BudgetGuard check (Phase 16 plugs in here; no-op until then) ---
+    workflow_context.set_review_id(state["review_id"])
 
-    diff_text = state.get("diff") or ""
-    repo = state.get("repo") or ""
-
-    context_chunks: list[dict] = []
-    if diff_text and repo:
-        capability_scope.enforce(agent_type, "retrieve_context")
-        try:
-            context_chunks = await retrieve(repo, diff_text)
-        except Exception as exc:  # noqa: BLE001 - retrieval outage shouldn't kill the agent
-            logger.warning(
-                "agent=%s: retrieval failed, continuing ungrounded: %s", agent_type.value, exc
+    with workflow_context.span() as (agent_span_id, agent_parent_span):
+        with traced_span(f"agent.{agent_type.value}", agent=agent_type.value):
+            t_agent0 = time.monotonic()
+            await emit_agent_event(
+                agent_type.value, "span.start",
+                span_id=agent_span_id, parent_span=agent_parent_span,
             )
 
-    lint_hits: list[str] = []
-    if agent_type is AgentType.SECURITY and diff_text:
-        lint_hits = capability_scope.call_tool(
-            agent_type, "run_static_analysis", tool_registry.run_static_analysis, diff_text
-        )
+            # --- BudgetGuard check (Phase 16 plugs in here; no-op until then) ---
 
-    user_parts = [f"PR diff:\n{diff_text or '(no diff provided)'}"]
-    user_parts.append(f"\nRetrieved codebase context:\n{_format_context(context_chunks)}")
-    if lint_hits:
-        user_parts.append(
-            "\nStatic analysis flagged these risky calls in the diff:\n"
-            + "\n".join(f"- {h}" for h in lint_hits)
-        )
-    user_message = "\n".join(user_parts)
+            diff_text = state.get("diff") or ""
+            repo = state.get("repo") or ""
 
-    system_prompt = get_prompt(agent_type.value) + _JSON_INSTRUCTIONS
-    model = model_router.model_for(agent_type)
+            context_chunks: list[dict] = []
+            if diff_text and repo:
+                capability_scope.enforce(agent_type, "retrieve_context")
+                try:
+                    context_chunks = await retrieve(repo, diff_text)
+                except Exception as exc:  # noqa: BLE001 - retrieval outage shouldn't kill the agent
+                    logger.warning(
+                        "agent=%s: retrieval failed, continuing ungrounded: %s",
+                        agent_type.value, exc,
+                    )
 
-    logger.info("agent=%s model=%s: calling LLM", agent_type.value, model)
-    try:
-        # complete() is a blocking network call; keep the event loop free so the four
-        # specialists actually run concurrently (ARCHITECTURE §3.2 parallel fan-out).
-        result = await asyncio.to_thread(
-            complete, model=model, system=system_prompt, user=user_message,
-            max_tokens=_MAX_TOKENS,
-        )
-    except Exception as exc:  # noqa: BLE001 - one specialist's outage != a failed review
-        logger.warning("agent=%s: LLM call failed: %s", agent_type.value, exc)
-        return []
+            lint_hits: list[str] = []
+            if agent_type is AgentType.SECURITY and diff_text:
+                with workflow_context.span() as (tool_span_id, tool_parent_span):
+                    with traced_span("tool.call", tool_name="run_static_analysis"):
+                        lint_hits = capability_scope.call_tool(
+                            agent_type, "run_static_analysis",
+                            tool_registry.run_static_analysis, diff_text,
+                        )
+                        await emit_agent_event(
+                            agent_type.value, "tool.call",
+                            span_id=tool_span_id, parent_span=tool_parent_span,
+                            outcome="ok", payload={"tool_name": "run_static_analysis",
+                                                    "hits": len(lint_hits)},
+                        )
 
-    findings = _parse_findings(agent_type, result.text)
-    logger.info(
-        "agent=%s model=%s tokens_in=%d tokens_out=%d findings=%d",
-        agent_type.value, result.model, result.input_tokens, result.output_tokens,
-        len(findings),
-    )
+            user_parts = [f"PR diff:\n{diff_text or '(no diff provided)'}"]
+            user_parts.append(
+                f"\nRetrieved codebase context:\n{_format_context(context_chunks)}"
+            )
+            if lint_hits:
+                user_parts.append(
+                    "\nStatic analysis flagged these risky calls in the diff:\n"
+                    + "\n".join(f"- {h}" for h in lint_hits)
+                )
+            user_message = "\n".join(user_parts)
 
-    # --- event emission (Phase 10 plugs in here; logging above stands in for now) ---
+            system_prompt = get_prompt(agent_type.value) + _JSON_INSTRUCTIONS
+            model = model_router.model_for(agent_type)
+
+            findings: list[Finding] = []
+            with workflow_context.span() as (llm_span_id, llm_parent_span):
+                with traced_span("llm.call", model=model):
+                    logger.info("agent=%s model=%s: calling LLM", agent_type.value, model)
+                    t_llm0 = time.monotonic()
+                    try:
+                        # complete() is a blocking network call; keep the event loop free
+                        # so the four specialists actually run concurrently
+                        # (ARCHITECTURE §3.2 parallel fan-out).
+                        result = await asyncio.to_thread(
+                            complete, model=model, system=system_prompt, user=user_message,
+                            max_tokens=_MAX_TOKENS,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - one specialist's outage != a failed review
+                        latency_ms = int((time.monotonic() - t_llm0) * 1000)
+                        logger.warning("agent=%s: LLM call failed: %s", agent_type.value, exc)
+                        await emit_agent_event(
+                            agent_type.value, "llm.call",
+                            span_id=llm_span_id, parent_span=llm_parent_span,
+                            model=model, latency_ms=latency_ms, outcome="error",
+                            payload={"error": str(exc)},
+                        )
+                    else:
+                        latency_ms = int((time.monotonic() - t_llm0) * 1000)
+                        findings = _parse_findings(agent_type, result.text)
+                        cost = estimate_cost_usd(
+                            result.model, result.input_tokens, result.output_tokens
+                        )
+                        logger.info(
+                            "agent=%s model=%s tokens_in=%d tokens_out=%d findings=%d",
+                            agent_type.value, result.model, result.input_tokens,
+                            result.output_tokens, len(findings),
+                        )
+                        await emit_agent_event(
+                            agent_type.value, "llm.call",
+                            span_id=llm_span_id, parent_span=llm_parent_span,
+                            model=result.model, tokens_in=result.input_tokens,
+                            tokens_out=result.output_tokens, cost_usd=cost,
+                            latency_ms=latency_ms, outcome="ok",
+                        )
+
+            total_latency_ms = int((time.monotonic() - t_agent0) * 1000)
+            avg_confidence = (
+                sum(f.confidence for f in findings) / len(findings) if findings else None
+            )
+            await emit_agent_event(
+                agent_type.value, "span.end",
+                span_id=agent_span_id, parent_span=agent_parent_span,
+                outcome="ok", confidence=avg_confidence, latency_ms=total_latency_ms,
+                payload={"findings_count": len(findings)},
+            )
+
     return findings

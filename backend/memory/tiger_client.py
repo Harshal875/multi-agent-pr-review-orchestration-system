@@ -4,29 +4,16 @@ Vector lane: DiskANN ANN search on the 256-dim embedding (cosine distance).
 Keyword lane: full-text search over the generated content_tsv GIN index.
 
 Uses asyncpg directly (the hot request-path access style, per ADR-003) with a lazily
-created pool. The libpq sslmode query param is stripped and SSL is passed as a context,
-since asyncpg configures TLS through connect args rather than the DSN. Replaces the
-retired qdrant_client (ADR-003)."""
+created pool. Replaces the retired qdrant_client (ADR-003)."""
 
 from __future__ import annotations
 
-import ssl
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncpg
 
 from backend.config import settings
-
-
-def _dsn_and_ssl(url: str) -> tuple[str, ssl.SSLContext | None]:
-    parts = urlsplit(url)
-    query = dict(parse_qsl(parts.query))
-    sslmode = query.pop("sslmode", None)
-    dsn = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
-    is_local = parts.hostname in ("localhost", "127.0.0.1")
-    ctx = None if (is_local or sslmode in ("disable",)) else ssl.create_default_context()
-    return dsn, ctx
+from backend.database.asyncpg_dsn import dsn_and_ssl
 
 
 def _vec_literal(embedding: list[float]) -> str:
@@ -39,7 +26,7 @@ class TigerMemoryClient:
 
     async def _pool_(self) -> asyncpg.Pool:
         if self._pool is None:
-            dsn, ctx = _dsn_and_ssl(settings.tiger_database_url)
+            dsn, ctx = dsn_and_ssl(settings.tiger_database_url)
             self._pool = await asyncpg.create_pool(dsn=dsn, ssl=ctx, min_size=1, max_size=5)
         return self._pool
 

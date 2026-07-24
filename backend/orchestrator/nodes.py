@@ -20,6 +20,9 @@ import time
 
 from backend.agents import docs_agent, quality_agent, security_agent, test_agent
 from backend.config import settings
+from backend.observability import workflow_context
+from backend.observability.events import emit_agent_event
+from backend.observability.tracing import traced_span
 from backend.orchestrator.state import ReviewState
 
 logger = logging.getLogger("orchestrator")
@@ -137,6 +140,21 @@ async def aggregate(state: ReviewState) -> dict:
         "aggregate: %d raw -> %d deduped, overall=%.3f -> %s",
         len(raw_findings), len(deduped), overall, decision,
     )
+
+    workflow_context.set_review_id(state["review_id"])
+    with workflow_context.span() as (span_id, parent_span):
+        with traced_span("decision", decision=decision):
+            await emit_agent_event(
+                "aggregator", "decision",
+                span_id=span_id, parent_span=parent_span,
+                outcome=decision, confidence=overall,
+                payload={
+                    "hitl_reason": reason,
+                    "raw_count": len(raw_findings),
+                    "deduped_count": len(deduped),
+                },
+            )
+
     return {
         "deduped_findings": deduped,
         "overall_confidence": overall,

@@ -6,6 +6,8 @@ arq
 langgraph
 langgraph-checkpoint-redis
 voyageai
+opentelemetry-api
+opentelemetry-sdk
 pydantic
 pydantic-settings
 httpx
