@@ -24,9 +24,12 @@ class Settings(BaseSettings):
 
     # Embeddings — Voyage AI voyage-code-3 @ 256 dims (Phase 6/14)
     voyage_api_key: str = ""
-    # Reasoning — Claude/Anthropic (Phase 5/8)
+    # Reasoning — Groq (OpenAI-compatible) for the specialist agents (Phase 5/8)
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    # Unused fallbacks (Anthropic account had no credits, OpenAI no quota).
+    # Interface is provider-agnostic, so either can be re-enabled by swapping llm_client.
     anthropic_api_key: str = ""
-    # Unused (OpenAI account had no quota; embeddings moved to Voyage)
     openai_api_key: str = ""
 
     # GitHub App
