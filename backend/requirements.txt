@@ -5,6 +5,7 @@ asyncpg
 arq
 langgraph
 langgraph-checkpoint-redis
+voyageai
 pydantic
 pydantic-settings
 httpx

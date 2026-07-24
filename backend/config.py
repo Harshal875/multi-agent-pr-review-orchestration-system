@@ -22,7 +22,11 @@ class Settings(BaseSettings):
     tiger_database_url: str
     redis_url: str = "redis://localhost:6379"
 
-    # LLM (used from Phase 5)
+    # Embeddings — Voyage AI voyage-code-3 @ 256 dims (Phase 6/14)
+    voyage_api_key: str = ""
+    # Reasoning — Claude/Anthropic (Phase 5/8)
+    anthropic_api_key: str = ""
+    # Unused (OpenAI account had no quota; embeddings moved to Voyage)
     openai_api_key: str = ""
 
     # GitHub App
