@@ -5,7 +5,13 @@ and drives the orchestration engine (ARCHITECTURE §3.1 - the queue decouples in
 review). As of Phase 4 review_job loads the pending review row, builds the initial
 ReviewState, and calls the workflow engine (LangGraph fan-out). The engine checkpoints to
 Redis, so if this worker is killed mid-review the job re-runs and resumes from the last
-completed node."""
+completed node.
+
+Phase 15 added the missing write-back: once the engine returns, repository.complete_review
+persists the aggregator's deduped findings + overall_confidence to the truth lane
+(finding_records / pr_review_records) - before this, agent output only ever lived in the
+LangGraph checkpoint, and GET /reviews/{id}/findings had always returned an empty list for
+every real review."""
 
 from __future__ import annotations
 
@@ -48,13 +54,21 @@ async def review_job(ctx: dict, review_id: str) -> str | None:
         "pr_number": record.pr_number,
         "commit_sha": record.commit_sha,
         "diff": "",          # Phase 8+: fetch real diff via integrations/github_client
-        "context": [],
         "findings": [],
     }
 
     engine = get_engine()
     result = await engine.run(review_id, initial_state)
     decision = result.get("decision")
+
+    async with SessionLocal() as session:
+        await repository.complete_review(
+            session, uuid.UUID(review_id),
+            decision=decision,
+            overall_confidence=result.get("overall_confidence"),
+            findings=result.get("deduped_findings", []),
+        )
+
     logger.info("review_job done review_id=%s decision=%s", review_id, decision)
     return decision
 

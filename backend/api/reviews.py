@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.api.schemas import FindingOut, ReviewOut
 from backend.database.postgres import get_session
 from backend.database.repository import get_findings, get_review, list_reviews
+from backend.observability.audit import get_review_audit
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -39,3 +40,15 @@ async def get_review_findings(
     if await get_review(session, review_id) is None:
         raise HTTPException(status_code=404, detail="review not found")
     return list(await get_findings(session, review_id))
+
+
+@router.get("/{review_id}/audit")
+async def get_review_audit_endpoint(
+    review_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+):
+    """Phase 15: for every finding in this review, the full decision trail (what was
+    retrieved, what prompt/model ran, what confidence resulted) - "why did the agent
+    say this?" answerable from this response alone."""
+    if await get_review(session, review_id) is None:
+        raise HTTPException(status_code=404, detail="review not found")
+    return await get_review_audit(review_id)

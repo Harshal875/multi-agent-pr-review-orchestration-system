@@ -71,3 +71,50 @@ async def get_findings(
         .order_by(FindingRecord.created_at.asc())
     )
     return result.scalars().all()
+
+
+async def complete_review(
+    session: AsyncSession,
+    review_id: uuid.UUID,
+    *,
+    decision: str | None,
+    overall_confidence: float | None,
+    findings: list[dict],
+) -> None:
+    """Persist the aggregator's output (Phase 8) to the truth lane: one FindingRecord per
+    deduped finding, and the review's overall_confidence - this is the gap Phase 15's
+    audit endpoint needs closed, since nothing wrote agent output to finding_records
+    before this (GET /reviews/{id}/findings had always returned an empty list for every
+    real review).
+
+    A "post" decision does NOT set status='posted' here - no GitHub-posting capability
+    exists yet (integrations/github_client.py is still a Phase-1 stub), so claiming
+    'posted' would misrepresent state that hasn't actually happened. status only
+    advances to 'awaiting_human', which is unconditionally true the moment the gate
+    routes there. Whichever phase wires real GitHub delivery should set status='posted'
+    and posted_at at the point delivery actually succeeds, not here."""
+    review = await session.get(PRReviewRecord, review_id)
+    if review is None:
+        return
+
+    review.overall_confidence = overall_confidence
+    if decision == "awaiting_human":
+        review.status = "awaiting_human"
+
+    for f in findings:
+        session.add(
+            FindingRecord(
+                review_id=review_id,
+                agent_type=f["agent_type"],
+                severity=f["severity"],
+                category=f["category"],
+                summary=f["summary"],
+                file_path=f["file_path"],
+                line_start=f.get("line_start"),
+                line_end=f.get("line_end"),
+                suggestion=f.get("suggestion"),
+                confidence=f["confidence"],
+                rationale=f["rationale"],
+            )
+        )
+    await session.commit()

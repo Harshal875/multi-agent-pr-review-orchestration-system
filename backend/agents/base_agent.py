@@ -153,13 +153,31 @@ async def run_specialist(agent_type: AgentType, state: ReviewState) -> list[Find
             context_chunks: list[dict] = []
             if diff_text and repo:
                 capability_scope.enforce(agent_type, "retrieve_context")
-                try:
-                    context_chunks = await retrieve(repo, diff_text)
-                except Exception as exc:  # noqa: BLE001 - retrieval outage shouldn't kill the agent
-                    logger.warning(
-                        "agent=%s: retrieval failed, continuing ungrounded: %s",
-                        agent_type.value, exc,
-                    )
+                with workflow_context.span() as (retr_span_id, retr_parent_span):
+                    try:
+                        context_chunks = await retrieve(repo, diff_text)
+                        await emit_agent_event(
+                            agent_type.value, "retrieval",
+                            span_id=retr_span_id, parent_span=retr_parent_span,
+                            outcome="ok",
+                            payload={
+                                "chunks": [
+                                    {"path": c["path"], "symbol": c.get("symbol")}
+                                    for c in context_chunks
+                                ],
+                                "count": len(context_chunks),
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001 - retrieval outage shouldn't kill the agent
+                        logger.warning(
+                            "agent=%s: retrieval failed, continuing ungrounded: %s",
+                            agent_type.value, exc,
+                        )
+                        await emit_agent_event(
+                            agent_type.value, "retrieval",
+                            span_id=retr_span_id, parent_span=retr_parent_span,
+                            outcome="error", payload={"error": str(exc)},
+                        )
 
             lint_hits: list[str] = []
             if agent_type is AgentType.SECURITY and diff_text:
