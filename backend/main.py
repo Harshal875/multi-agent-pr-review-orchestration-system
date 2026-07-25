@@ -10,9 +10,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from backend.api import hitl_router
+from backend.api import economics_router, hitl_router
 from backend.api import queue as queue_router
 from backend.api import reviews as reviews_router
 from backend.database.postgres import engine
@@ -32,12 +33,22 @@ async def lifespan(app: FastAPI):
         await engine.dispose()
 
 
-app = FastAPI(title="AI PR Review Agent", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="AI PR Review Agent", version="0.4.0", lifespan=lifespan)
+
+# Dev-open CORS so the Next.js dashboard (Phase 2/17) can call the API from the browser.
+# Tighten allow_origins to the deployed frontend origin in production.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(webhook_router.router)
 app.include_router(reviews_router.router)
 app.include_router(queue_router.router)
 app.include_router(hitl_router.router)
+app.include_router(economics_router.router)
 
 
 @app.get("/health")

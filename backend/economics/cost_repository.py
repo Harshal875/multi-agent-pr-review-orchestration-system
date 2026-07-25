@@ -43,3 +43,31 @@ async def get_today_cost_usd() -> float:
         """
     )
     return float(total)
+
+
+async def get_recent_review_costs(limit: int = 20) -> list[dict]:
+    """Per-review cost rollup from the pr_cost_hourly continuous aggregate (Phase 16),
+    newest first - powers the frontend economics page."""
+    pool = await _pool_()
+    rows = await pool.fetch(
+        """
+        SELECT review_id, sum(total_cost_usd) AS cost_usd,
+               max(agents_used) AS agents_used, max(max_confidence) AS max_confidence,
+               max(bucket) AS last_bucket
+        FROM pr_cost_hourly
+        GROUP BY review_id
+        ORDER BY last_bucket DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [
+        {
+            "review_id": str(r["review_id"]),
+            "cost_usd": float(r["cost_usd"]) if r["cost_usd"] is not None else 0.0,
+            "agents_used": r["agents_used"],
+            "max_confidence": float(r["max_confidence"]) if r["max_confidence"] is not None else None,
+            "last_bucket": r["last_bucket"].isoformat() if r["last_bucket"] else None,
+        }
+        for r in rows
+    ]

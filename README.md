@@ -134,7 +134,7 @@ Definition-of-Done verified against a live pipeline before moving on.
 | 9 | Evaluation (golden dataset, LLM-judge, regression gate) | ⚠️ built; full clean verification pending quota |
 | 18 | CI/CD (smoke gate + regression gate on prompt changes) | ✅ |
 | 19 | Human-in-the-Loop + real GitHub integration | ✅ |
-| 2 & 17 | Frontend dashboard | ⏳ not started |
+| 2 & 17 | Frontend dashboard (Next.js: reviews, trace viewer, HITL queue, cost) | ✅ |
 | 20 | Continuous Learning (feeds on HITL feedback) | ⏳ optional |
 
 ---
@@ -180,13 +180,15 @@ Each phase ships a runnable proof under `scripts/` (e.g. `phase8_agents_test.py`
 ## Honest status
 
 This is a working system, verified live phase by phase — including a real AI review posted
-to an actual GitHub PR. Two things are deliberately scoped out and labeled as such, rather
+to an actual GitHub PR. One thing is deliberately scoped out and labeled as such, rather
 than faked:
 
-- The **frontend dashboard** (Phase 2/17) isn't built — the backend exposes the read/write
-  API it would consume.
 - **Fully-automatic webhook triggering** needs a public tunnel (e.g. smee.io) to receive
   GitHub's webhooks locally; the human-approval loop itself is fully working and tested.
+
+The **frontend dashboard** (`frontend/`, Next.js) is built and consumes the live API
+(reviews, the `agent_events` trace waterfall, the HITL approval queue, and cost) — run it
+with `cd frontend && npm install && npm run dev` against the running backend.
 
 Where an external account hit a free-tier quota wall mid-verification, the reliability layer
 (circuit breaker, retries) handled it correctly — and that's documented honestly rather than
