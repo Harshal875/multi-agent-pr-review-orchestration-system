@@ -32,3 +32,8 @@ Thumbs.db
 
 # Phase 4 test scratch (defensive; test now uses system temp)
 phase4_logs/
+
+# Phase 9: regression_gate.py's persisted baseline is runtime state (each machine/run
+# records its own), not source - a bad run (e.g. quota-exhausted judge calls) can
+# corrupt it, and it should never be committed as if it were a trusted, reviewed value.
+backend/evaluation/baseline_score.json
