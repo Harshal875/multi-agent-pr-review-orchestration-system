@@ -3,6 +3,7 @@ findings live, so callers depend on a narrow interface (ADR-002)."""
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from collections.abc import Sequence
 
@@ -10,9 +11,18 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database.models import FindingRecord, PRReviewRecord
+from backend.database.models import (
+    FindingRecord,
+    HITLFeedback,
+    HITLReview,
+    PRReviewRecord,
+)
 from backend.models.webhook import WebhookEvent
 from backend.reliability.idempotency import idempotent_insert
+
+
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
 
 
 async def create_pending_review(
@@ -69,6 +79,96 @@ async def get_findings(
         select(FindingRecord)
         .where(FindingRecord.review_id == review_id)
         .order_by(FindingRecord.created_at.asc())
+    )
+    return result.scalars().all()
+
+
+async def get_finding(session: AsyncSession, finding_id: uuid.UUID) -> FindingRecord | None:
+    return await session.get(FindingRecord, finding_id)
+
+
+# --- Phase 19: posting + HITL lifecycle -------------------------------------------
+
+async def mark_review_posted(
+    session: AsyncSession, review_id: uuid.UUID, github_review_id: str
+) -> None:
+    review = await session.get(PRReviewRecord, review_id)
+    if review is None:
+        return
+    review.status = "posted"
+    review.github_review_id = github_review_id
+    review.posted_at = _utcnow()
+    await session.commit()
+
+
+async def set_review_status(
+    session: AsyncSession, review_id: uuid.UUID, status: str
+) -> None:
+    review = await session.get(PRReviewRecord, review_id)
+    if review is None:
+        return
+    review.status = status
+    await session.commit()
+
+
+async def create_hitl_review(
+    session: AsyncSession, review_id: uuid.UUID, reason: str
+) -> HITLReview:
+    row = HITLReview(review_id=review_id, reason=reason)
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def list_open_hitl_reviews(session: AsyncSession) -> Sequence[HITLReview]:
+    result = await session.execute(
+        select(HITLReview)
+        .where(HITLReview.status == "open")
+        .order_by(HITLReview.created_at.asc())
+    )
+    return result.scalars().all()
+
+
+async def get_open_hitl_review_for(
+    session: AsyncSession, review_id: uuid.UUID
+) -> HITLReview | None:
+    result = await session.execute(
+        select(HITLReview)
+        .where(HITLReview.review_id == review_id, HITLReview.status == "open")
+        .order_by(HITLReview.created_at.desc())
+    )
+    return result.scalars().first()
+
+
+async def resolve_hitl_review(
+    session: AsyncSession, hitl_id: uuid.UUID, status: str, reviewer: str | None
+) -> HITLReview | None:
+    row = await session.get(HITLReview, hitl_id)
+    if row is None:
+        return None
+    row.status = status
+    row.reviewer = reviewer
+    row.resolved_at = _utcnow()
+    await session.commit()
+    return row
+
+
+async def create_hitl_feedback(
+    session: AsyncSession, finding_id: uuid.UUID, verdict: str, comment: str | None = None
+) -> HITLFeedback:
+    row = HITLFeedback(finding_id=finding_id, verdict=verdict, comment=comment)
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def get_feedback_for_finding(
+    session: AsyncSession, finding_id: uuid.UUID
+) -> Sequence[HITLFeedback]:
+    result = await session.execute(
+        select(HITLFeedback).where(HITLFeedback.finding_id == finding_id)
     )
     return result.scalars().all()
 

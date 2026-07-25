@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
+from backend.api import hitl_router
 from backend.api import queue as queue_router
 from backend.api import reviews as reviews_router
 from backend.database.postgres import engine
@@ -36,6 +37,7 @@ app = FastAPI(title="AI PR Review Agent", version="0.3.0", lifespan=lifespan)
 app.include_router(webhook_router.router)
 app.include_router(reviews_router.router)
 app.include_router(queue_router.router)
+app.include_router(hitl_router.router)
 
 
 @app.get("/health")

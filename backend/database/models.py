@@ -8,7 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -31,7 +31,10 @@ class PRReviewRecord(Base):
     overall_confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
     github_review_id: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"))
-    posted_at: Mapped[dt.datetime | None] = mapped_column()
+    # timezone=True: the DB column is TIMESTAMPTZ and we write a tz-aware datetime from
+    # Python (repository.mark_review_posted). Without it SQLAlchemy binds as naive
+    # TIMESTAMP and asyncpg rejects the tz-aware value.
+    posted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class FindingRecord(Base):
@@ -71,7 +74,9 @@ class HITLReview(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'open'"))
     reviewer: Mapped[str | None] = mapped_column(Text)
-    resolved_at: Mapped[dt.datetime | None] = mapped_column()
+    # timezone=True: TIMESTAMPTZ column written with a tz-aware datetime from Python
+    # (repository.resolve_hitl_review) - see PRReviewRecord.posted_at note.
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[dt.datetime] = mapped_column(server_default=text("now()"))
 
 
