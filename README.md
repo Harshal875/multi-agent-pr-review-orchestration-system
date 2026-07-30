@@ -192,4 +192,4 @@ with `cd frontend && npm install && npm run dev` against the running backend.
 
 Where an external account hit a free-tier quota wall mid-verification, the reliability layer
 (circuit breaker, retries) handled it correctly — and that's documented honestly rather than
-papered over. 
+papered over.
